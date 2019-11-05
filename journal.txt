@@ -1,0 +1,239 @@
+# Naive matrix multiply
+
+  for (int i = 0; i < A_size[0]; i++) {
+    for (int j = 0; j < A_size[1]; j++) {
+      for (int k = 0; k < B_size[1]; k++) {
+        C[i*C_size[1] + k] += A[i*A_size[1] + j] + B[j*B_size[1] + k];
+      }
+    }
+  }
+
+Compare IJK versus IKJ loop interchange
+
+IJK
+
+==17981== I   refs:      74,513,716
+==17981== I1  misses:           955
+==17981== LLi misses:           939
+==17981== I1  miss rate:       0.00%
+==17981== LLi miss rate:       0.00%
+==17981== 
+==17981== D   refs:      24,103,043  (16,154,685 rd   + 7,948,358 wr)
+==17981== D1  misses:       387,504  (   379,980 rd   +     7,524 wr)
+==17981== LLd misses:         8,939  (     1,497 rd   +     7,442 wr)
+==17981== D1  miss rate:        1.6% (       2.4%     +       0.1%  )
+==17981== LLd miss rate:        0.0% (       0.0%     +       0.1%  )
+==17981== 
+==17981== LL refs:          388,459  (   380,935 rd   +     7,524 wr)
+==17981== LL misses:          9,878  (     2,436 rd   +     7,442 wr)
+==17981== LL miss rate:         0.0% (       0.0%     +       0.1%  )
+==17981== 
+==17981== Branches:       8,014,698  ( 7,934,355 cond +    80,343 ind)
+==17981== Mispredicts:      171,243  (   171,089 cond +       154 ind)
+==17981== Mispred rate:         2.1% (       2.2%     +       0.2%   )
+
+IKJ
+
+==17992== I   refs:      62,613,519
+==17992== I1  misses:           956
+==17992== LLi misses:           940
+==17992== I1  miss rate:       0.00%
+==17992== LLi miss rate:       0.00%
+==17992== 
+==17992== D   refs:      18,143,043  (16,164,685 rd   + 1,978,358 wr)
+==17992== D1  misses:       387,654  (   380,130 rd   +     7,524 wr)
+==17992== LLd misses:         8,938  (     1,496 rd   +     7,442 wr)
+==17992== D1  miss rate:        2.1% (       2.4%     +       0.4%  )
+==17992== LLd miss rate:        0.0% (       0.0%     +       0.4%  )
+==17992== 
+==17992== LL refs:          388,610  (   381,086 rd   +     7,524 wr)
+==17992== LL misses:          9,878  (     2,436 rd   +     7,442 wr)
+==17992== LL miss rate:         0.0% (       0.0%     +       0.4%  )
+==17992== 
+==17992== Branches:       8,024,698  ( 7,944,355 cond +    80,343 ind)
+==17992== Mispredicts:      181,230  (   181,076 cond +       154 ind)
+==17992== Mispred rate:         2.3% (       2.3%     +       0.2%   )
+
+Most notably: D refs goes from 24M to 18M
+
+What does this mean for cycles?  Cachegrind estimates cycles as:
+
+    L1m = I1mr + D1mr + D1mw
+    LLm = ILmr + DLmr + DLmw
+    CEst = Ir + 10 Bm + 10 L1m + 100 LLm
+
+So basically, it counts Drs as free.  So we expect speed-up only from
+reduction in instructions retired.  Something like a 15% speedup.
+*It's not possible to measure this speedup by conventional means.*
+
+RIPLEY: I updated the matrix sizes and caused the error case to happen
+
+Increase size of inputs to 1024*1024 (still bigger than LL cache)
+
+IJK
+
+l1 misses:  67,458,543 (i 1,787 + dr 67,257,678 + dw 199,078)
+ll misses:    332,406 (i 1,745 + dr 132,383 + dw 198,278)
+cycle estimate: 10,911,576,108
+
+MKL sgemm_
+
+l1 misses:  4,590,757 (i 6,811 + dr 4,268,479 + dw 315,467)
+ll misses:    378,509 (i 5,693 + dr 156,446 + dw 216,370)
+cycle estimate: 874,058,855
+
+Real time comparison:
+
+IJK 0.80s
+MKL sgemm_ 0.14s
+
+Cycle estimate predicts that MKL will take 7% of the time; in
+reality it takes 17% of the time.
+
+Some notes about the feasibility of actually doing cachegrind on
+a "real" workflow:
+
+    size    time (s)
+    32       1.1
+    64       1.1
+    128      1.2
+    256      1.9
+    512      7.1
+    1024    47.3      # wow!
+    2048   600+       # ummmmm
+
+The unfortunate side effect of this is we cannot easily test cache
+effects with operations that involve matrix multiply, as the amount
+of compute you have to do to deal with matrices that occupy last-level
+cache involves too much compute.
+
+# Small dispatch model
+
+1. 1d tensor only, shared ptr: zero allocate and then negate, 32-bit integers
+
+instrs:     2,083,027
+l1 misses:     16,496 (i 1,175 + dr 13,075 + dw 2,246)
+ll misses:     10,428 (i 1,142 + dr 7,831 + dw 1,455)
+b misses:      15,212 (cond 14,920 + indirect 292)
+cycle estimate: 3,442,907
+
+2. as (1) but 64-bit integers
+
+instrs:     2,083,023
+l1 misses:     16,496 (i 1,175 + dr 13,075 + dw 2,246)
+ll misses:     10,428 (i 1,142 + dr 7,831 + dw 1,455)
+b misses:      15,214 (cond 14,922 + indirect 292)
+cycle estimate: 3,442,923
+
+(intuition: 64-bit integers don't harm computation time on CPUs (unlike
+GPUs)--primary harm is in memory size (there's not enough here to matter).
+In fact it is a tiny improvement with 64-bit integers, probably because
+64-bit instruction set lets us do some things in less instructions.
+
+3. as (2) but unique_ptr and C++14
+
+instrs:     2,085,930
+l1 misses:     16,449 (i 1,168 + dr 13,035 + dw 2,246)
+ll misses:     10,406 (i 1,134 + dr 7,819 + dw 1,453)
+b misses:      15,167 (cond 14,890 + indirect 277)
+cycle estimate: 3,442,690
+
+very slight improvement in data locality.  Oddly number of instructions
+goes up (huh?)
+
+4. as (2) but C++14
+
+instrs:     2,091,223
+l1 misses:     16,497 (i 1,176 + dr 13,075 + dw 2,246)
+ll misses:     10,429 (i 1,143 + dr 7,831 + dw 1,455)
+b misses:      15,228 (cond 14,938 + indirect 290)
+cycle estimate: 3,451,373
+
+question is answered: instruction increase is due to different C++14 library!
+
+5. as (4) but virtual dispatch
+
+(is there a way to exclude work?)
+
+instrs:     2,091,227
+l1 misses:     16,500 (i 1,178 + dr 13,075 + dw 2,247)
+ll misses:     10,431 (i 1,145 + dr 7,831 + dw 1,455)
+b misses:      15,235 (cond 14,944 + indirect 291)
+cycle estimate: 3,451,677
+
+6. as (5) but without virtual dispatch (account for startup costs)
+
+instrs:     2,091,227
+l1 misses:     16,500 (i 1,178 + dr 13,075 + dw 2,247)
+ll misses:     10,431 (i 1,145 + dr 7,831 + dw 1,455)
+b misses:      15,234 (cond 14,944 + indirect 290)
+cycle estimate: 3,451,667
+
+(notice we only saved one missed indirect jump)
+
+(at this point, the inability to scope events to a certain function is hurting us)
+
+7. no-op run
+
+instrs:     2,068,041
+l1 misses:     16,264 (i 1,130 + dr 13,017 + dw 2,117)
+ll misses:     10,251 (i 1,098 + dr 7,828 + dw 1,325)
+b misses:      15,074 (cond 14,810 + indirect 264)
+cycle estimate: 3,406,521
+
+(future runs will be calibrated this way)
+
+8. as (4) but virtual dispatcch
+
+instrs:        23,186
+l1 misses:        236 (i 48 + dr 58 + dw 130)
+ll misses:        180 (i 47 + dr 3 + dw 130)
+b misses:         161 (cond 134 + indirect 27)
+cycle estimate: 45,156
+
+9. as (8) but without virtual dispatch, but with startup
+
+instrs:        23,186
+l1 misses:        236 (i 48 + dr 58 + dw 130)
+ll misses:        180 (i 47 + dr 3 + dw 130)
+b misses:         160 (cond 134 + indirect 26)
+cycle estimate: 45,146
+
+(so the indirect miss, by cachegrind's cost model, accounts
+only for 0.02% of overhead)
+
+10. as (8) but size 1
+
+instrs:         4,722
+l1 misses:         90 (i 40 + dr 47 + dw 3)
+ll misses:         45 (i 39 + dr 3 + dw 3)
+b misses:          99 (cond 72 + indirect 27)
+cycle estimate: 11,112
+
+(changing the size of the tensor to 1 only increases it to
+0.08% of overhead)
+
+(nb: verified that gcc is not able to indirect out the indirect
+call--this is also shown by the missed prediction)
+
+11. as (10) but virtualized numel/data
+
+instrs:         4,902
+l1 misses:         93 (i 41 + dr 48 + dw 4)
+ll misses:         49 (i 40 + dr 5 + dw 4)
+b misses:         104 (cond 78 + indirect 26)
+cycle estimate: 11,772
+
+(this is chonky! 5% slowdown)
+
+12. as (11), but save numel to a local before doing loop in negate
+
+instrs:         4,897
+l1 misses:         95 (i 43 + dr 48 + dw 4)
+ll misses:         51 (i 42 + dr 5 + dw 4)
+b misses:         101 (cond 75 + indirect 26)
+cycle estimate: 11,957
+
+(amazingly, this made it worse!  We reduced instructions
+and branch misses, but paid for worse cache locality,
+probably because we have more llocals now)
